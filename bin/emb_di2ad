@@ -6,6 +6,7 @@ function mycli_command_prerequisites {
 cat <<__EOF__
 kpartx
 losetup
+dmsetup
 blkid
 lsc
 jq
@@ -163,7 +164,8 @@ function mycli_command_entry {
 
 		cd ${PARTITION_SRC_DIR}
 		find . > "${ARCHIVE_VERBOSE_DIR}/${PARTITION_NUMBER}.filelist.txt"
-		local SIZE=$(du -sb . | awk '{print $1}')
+		local SIZE=$(du -sk . | awk '{print $1}') 
+		SIZE=$((SIZE * 1024))
 		INFO "${p} => $(printf "%'d" ${SIZE}) bytes"
 		tar cf - . | pv -s ${SIZE} | tar xf - -C ${PARTITION_DST_DIR}
 		du -s -m ./* > ${ARCHIVE_VERBOSE_DIR}/${PARTITION_NUMBER}.sizes
