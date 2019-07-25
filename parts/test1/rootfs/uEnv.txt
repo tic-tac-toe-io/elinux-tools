@@ -1,0 +1,257 @@
+#!/bin/bash
+#!/bin/hush (https://www.denx.de/wiki/DULG/CommandLineParsing)
+#
+
+# (loadaddr)
+KERNEL_ADDR=
+	0x82000000
+
+SCRIPT_ADDR=
+	0x82000000
+
+# (fdtaddr)
+FDT_ADDR=
+	0x88000000
+
+# (rdaddr)
+INITRD_ADDR=
+	0x88080000
+
+# (2nd-stage uboot script)
+YAC_UENV_SCRIPT=
+	uEnv.yac
+
+# GPIO pin for FactoryReset (FR) detection.
+YAC_FR_GPIO=
+	26
+
+# GPIO pin for SensorBoard Emoji animation trigger when FactoryReset
+YAC_FR_ANIMATION_GPIO=
+	23
+
+# I2C/EEPROM for FactoryReset (FR) detection.
+YAC_FR_I2C_CHIP=
+	0x50
+
+YAC_FR_I2C_ADDR=
+	0x0F
+
+YAC_DEVICE_INFO=
+	0x00
+
+YAC_DEVICE_SIGNATURE=
+	0x400
+
+# Default boot disk/type and its partition.
+YAC_BOOT_DISK=
+	0
+
+YAC_BOOT_PART=
+	1
+
+YAC_BOOT_TYPE=
+	mmc
+
+# Default boot from system partition.
+YAC_BOOT_NEXT=
+	load_for_sys
+
+welcome_messages=
+	echo "";
+	echo "==================================";
+	echo "Welcome to TicTacToe with U-BOOT!!";
+	echo "==================================";
+	echo "";
+
+load_envs_generic_check=
+	if test -n ${yac_bootcmd}; then 
+		run load_envs_done; 
+	else 
+		echo "[u#entry ] missing yac_bootcmd from ${PARTITION_LOCATION}:/${YAC_UENV_SCRIPT}" && run ${fallback_action}; 
+	fi
+
+load_envs_generic_import=
+	echo "[u#entry ] env import -t ${SCRIPT_ADDR} ${filesize}"; 
+	if env import -t ${SCRIPT_ADDR} ${filesize}; then 
+		echo "[u#entry ] successfully load ${YAC_UENV_SCRIPT} from ${PARTITION_LOCATION}" && run load_envs_generic_check; 
+	else 
+		echo "[u#entry ] failed to import ${YAC_UENV_SCRIPT} from ${PARTITION_LOCATION}" && run ${fallback_action}; 
+	fi
+
+load_envs_generic=
+	echo "[u#entry ] load ${PARTITION_LOCATION} ${SCRIPT_ADDR} ${YAC_UENV_SCRIPT}"; 
+	if load ${PARTITION_LOCATION} ${SCRIPT_ADDR} ${YAC_UENV_SCRIPT}; then 
+		echo "[u#entry ] filesize: 0x${filesize} bytes" && run load_envs_generic_import; 
+	else 
+		echo "[u#entry ] failed to load ${YAC_UENV_SCRIPT} from ${PARTITION_LOCATION}" && run ${fallback_action}; 
+	fi
+
+load_envs_pre=
+	PARTITION_LOCATION="${YAC_BOOT_TYPE} ${YAC_BOOT_DISK}:${YAC_BOOT_PART}"; 
+	run clear_addresses; 
+	run load_envs_generic;
+
+load_envs_for_mmc0_p1_reset=
+	setenv YAC_BOOT_TYPE mmc; 
+	setenv YAC_BOOT_DISK 0; 
+	setenv YAC_BOOT_PART 1; 
+	fallback_action="load_envs_for_mmc1_p1_reset"; 
+	run load_envs_pre;
+
+load_envs_for_mmc0_p2_sysfs=
+	setenv YAC_BOOT_TYPE mmc; 
+	setenv YAC_BOOT_DISK 0; 
+	setenv YAC_BOOT_PART 2; 
+	fallback_action="load_envs_for_mmc0_p1_reset"; 
+	run load_envs_pre;
+
+load_envs_for_mmc1_p1_reset=
+	setenv YAC_BOOT_TYPE mmc; 
+	setenv YAC_BOOT_DISK 1; 
+	setenv YAC_BOOT_PART 1; 
+	fallback_action="load_envs_fail"; 
+	run load_envs_pre;
+
+load_envs_for_mmc1_p2_sysfs=
+	setenv YAC_BOOT_TYPE mmc; 
+	setenv YAC_BOOT_DISK 1; 
+	setenv YAC_BOOT_PART 2; 
+	fallback_action="load_envs_for_mmc1_p1_reset"; 
+	run load_envs_pre;
+
+load_envs_for_usb0_p1_reset=
+	setenv YAC_BOOT_TYPE usb; 
+	setenv YAC_BOOT_DISK 0; 
+	setenv YAC_BOOT_PART 1; 
+	fallback_action="load_envs_for_mmc0_p1_reset"; 
+	run load_envs_pre;
+
+load_envs_for_usb_netbootfr=
+	setenv YAC_BOOT_TYPE usb; 
+	setenv YAC_BOOT_DISK 0; 
+	setenv YAC_BOOT_PART 1; 
+	fallback_action="load_envs_netboot"; 
+	run load_envs_pre;
+
+load_envs_netboot=
+	echo "[u#entry ] dhcp ${SCRIPT_ADDR} ${YAC_FR_NETBOOT_FILE}"; 
+	if dhcp ${SCRIPT_ADDR} ${YAC_FR_NETBOOT_FILE}; then 
+		env import -t ${SCRIPT_ADDR} ${filesize}; 
+		run load_envs_done; 
+	else 
+		run load_envs_for_mmc0_p1_reset; 
+	fi
+
+load_envs_fail=
+	echo "[u#entry ] fail";
+
+load_envs_done=
+	echo "[u#entry ] done"; 
+	echo "[u#entry ] run yac_bootcmd from ${YAC_UENV_SCRIPT} at ${PARTITION_LOCATION}"; 
+	run yac_bootcmd;
+
+load_for_fr=
+	echo "[u#entry ] factory-reset mode"; 
+	usb reset; 
+	run load_envs_for_usb0_p1_reset;
+
+load_for_sys_mmc0=
+	echo "[u#entry ] system mode (sd)"; 
+	run load_envs_for_mmc0_p2_sysfs;
+
+load_for_sys_mmc1=
+	echo "[u#entry ] system mode (emmc)"; 
+	run load_envs_for_mmc1_p2_sysfs;
+
+load_for_sys=
+	if size mmc 0:1 uEnv.txt; then 
+		run load_for_sys_mmc0; 
+	else 
+		run load_for_sys_mmc1; 
+	fi
+
+factory_reset_detected=
+	echo "[u#entry ] factory-reset condition is detected"; 
+	gpio set ${YAC_FR_ANIMATION_GPIO} 1; 
+	setenv YAC_BOOT_NEXT load_for_fr; 
+	setenv cmdline yac=diagnose,factory-reset;
+
+# The location of 2nd stage uboot script from DHCP/TFTP server
+# E.g. boot/conscious/am335x/A335BNLT/000C/1646I3000038/uEnv.yac
+#
+setenv_vars=
+	setenv YAC_FR_NETBOOT_FILE boot/${board}/${board_name}/${board_rev}/${board_serial}/${YAC_UENV_SCRIPT};
+
+print_board_vars=
+	echo "[u#entry ] board = ${board}"; 
+	echo "[u#entry ] board_name = ${board_name}"; 
+	echo "[u#entry ] board_rev = ${board_rev}"; 
+	echo "[u#entry ] board_serial = ${board_serial}";
+
+clear_addresses=
+	mw.b ${SCRIPT_ADDR} 0 20; 
+	mw.b ${INITRD_ADDR} 0 20;
+
+detect_fr_i2c=
+	i2c dev 0; 
+	i2c read ${YAC_FR_I2C_CHIP} ${YAC_FR_I2C_ADDR}.2 1 ${SCRIPT_ADDR}; 
+	mw.b ${INITRD_ADDR} 1 1; 
+	md.b ${SCRIPT_ADDR} 20; 
+	md.b ${INITRD_ADDR} 20; 
+	if cmp.b ${SCRIPT_ADDR} ${INITRD_ADDR} 1; then 
+		run factory_reset_detected; 
+	else 
+		echo "[u#entry ] i2c:${YAC_FR_I2C_ADDR} => disabled"; 
+	fi
+
+detect_fr_gpio=
+	if gpio input ${YAC_FR_GPIO}; then 
+		run factory_reset_detected; 
+	else 
+		echo "[u#entry ] gpio:${YAC_FR_GPIO} => disabled" && run detect_fr_i2c; 
+	fi
+
+dump_device_signature=
+	i2c read ${YAC_FR_I2C_CHIP} ${YAC_DEVICE_SIGNATURE}.2 20 ${SCRIPT_ADDR}; 
+	echo "[u#entry ] device signature"; 
+	md.b ${SCRIPT_ADDR} 20; 
+
+dump_device_info=
+	i2c read ${YAC_FR_I2C_CHIP} ${YAC_DEVICE_INFO}.2 20 ${SCRIPT_ADDR}; 
+	echo "[u#entry ] device information"; 
+	md.b ${SCRIPT_ADDR} 20;
+
+uenvcmd=
+	run welcome_messages; 
+	run print_board_vars; 
+	run setenv_vars; 
+	run clear_addresses; 
+	run detect_fr_gpio; 
+	echo "[u#entry ] YAC_BOOT_NEXT => ${YAC_BOOT_NEXT}"; 
+	run dump_device_info; 
+	run dump_device_signature; 
+	run ${YAC_BOOT_NEXT};
+
+##
+#
+# uBoot:
+#  a. mmc 0, micro-SD
+#  b. mmc 1, eMMC
+#
+# When Factory-Reset:
+#  a. usb 0:1:/uEnv.yac
+#  b. mmc 0:1:/uEnv.yac (microsd#RECOVERY)
+#  c. mmc 1:1:/uEnv.yac (emmc#RECOVERY)
+#  d. failure (then, u-boot's next targets are `pxe` and `dhcp`. Refer to `boot_targets` environment variable)
+#
+# When Factory-Reset is not detected, and boots from micro-SD:
+#  a. mmc 0:2:/uEnv.yac (microsd#SYSTEM)
+#  b. mmc 0:1:/uEnv.yac (microsd#RECOVERY)
+#  c. mmc 1:1:/uEnv.yac (microsd#RECOVERY)
+#  d. failure (then, u-boot's next targets are `pxe` and `dhcp`. Refer to `boot_targets` environment variable)
+#
+# When Factory-Reset is not detected, and boots from eMMC:
+#  a. mmc 1:2:/uEnv.yac (emmc#SYSTEM)
+#  b. mmc 1:1:/uEnv.yac (emmc#RECOVERY)
+#  c. failure (then, u-boot's next targets are `pxe` and `dhcp`. Refer to `boot_targets` environment variable)
+
