@@ -1,0 +1,134 @@
+#!/bin/bash
+#
+
+function read_usb_conf {
+	[ "" == "$1" ] && return 1
+	(>&2 echo "cat ${USB_CONF} | ${SHYAML} get-value $1")
+	cat ${USB_CONF} | (${SHYAML} get-value $1 2>/dev/null)
+}
+
+function read_usb_action_parameter {
+	[ "" == "${USB_ACTION}" ] && return 1
+	[ "" == "$1" ] && return 1
+	(>&2 echo "cat ${USB_CONF} | ${SHYAML} get-value parameters.${USB_ACTION}.$1")
+	cat ${USB_CONF} | (${SHYAML} get-value parameters.${USB_ACTION}.$1 2>/dev/null)
+}
+
+function read_usb_action_parameter_as_args {
+	[ "" == "${USB_ACTION}" ] && return 1
+	[ "" == "$1" ] && return 1
+	(>&2 echo "cat ${USB_CONF} | ${SHYAML} get-values parameters.${USB_ACTION}.$1")
+	cat ${USB_CONF} | (${SHYAML} get-values parameters.${USB_ACTION}.$1 2>/dev/null) | tr '\n' ' '
+}
+
+#
+# Flash eMMC with the given local image file on USB storage.
+#
+function exec_usb_flash_local_file {
+	local FILE=$(read_usb_action_parameter "file")
+	[ "" == "${FILE}" ] && DBG "${FUNCNAME[0]} needs parameters[file] but missing" && return 1
+	local FILE_PATH="${USB_CONFIG_DIR}/${FILE}"
+	[ ! -f "${FILE_PATH}" ] && DBG "${FUNCNAME[0]} does not find image file ${FILE_PATH}" && return 1
+
+	local REBOOT=$(read_usb_action_parameter "reboot")
+	[ "" == "${REBOOT}" ] && REBOOT="true"
+
+	echo -e '\n\n#LMF,14\n\n' | /usr/bin/socat - file:/dev/ttyO1,b57600,nonblock,raw,echo=0,crnl
+	RUN_CMD_RAW yac downstore ${FILE_PATH} || return $?
+	echo -e '\n\n#LMF,1C\n\n' | /usr/bin/socat - file:/dev/ttyO1,b57600,nonblock,raw,echo=0,crnl
+
+	[ "true" == "${REBOOT}" ] && reboot
+	return 0
+}
+
+#
+# Run the shell script on USB storage (2nd partition: USB CONFIG partition)
+#
+function exec_usb_run_shell_script {		
+	local FILE=$(read_usb_action_parameter "file")
+	[ "" == "${FILE}" ] && FILE="yac-usb.sh"
+	local FILE_PATH="${USB_CONFIG_DIR}/${FILE}"
+	[ ! -f "${FILE_PATH}" ] && DBG "missing shell script ${FILE_PATH}" && return 1
+	source ${FILE_PATH}
+
+	export NODENV_ROOT="${SYS_DIR}/root/.nodenv"
+	export PATH="${NODENV_ROOT}/bin:${PATH}"
+	eval "$(nodenv init -)"
+
+	TOP_DIR=${TOP_DIR} \
+		yac_usb_script_main $(read_usb_action_parameter_as_args "args")
+}
+
+#
+# Reboot
+#
+function exec_usb_reboot {
+	local DELAY=$(read_usb_action_parameter "delay")
+	[ "" != "${DELAY}" ] && [ "0" != "${DELAY}" ] && DBG "sleep ${DELAY} seconds before reboot" && sleep ${DELAY}
+	reboot
+}
+
+#
+# Boot-up the debugger profile.
+#
+function exec_usb_yac_boot {
+	YAC_BOOT_IGNORE_EXTRA_ETHERNET_IF=true \
+		YAC_BOOT_IGNORE_TIME_DAEMON=true \
+		YAC_BOOT_IGNORE_WIRELESS_NETWORK_CONNECT=true \
+		YAC_BOOT_IGNORE_SEND_SYSINFO_TO_CLOUD=true \
+		YAC_BOOT_IGNORE_NTP=true \
+		YAC_BOOT_IGNORE_LOAD_CRONTAB_TASKS=true \
+		YAC_BOOT_IGNORE_PROFILE_INIT_SCRIPTS=true \
+		yac boot
+}
+
+#
+# Startup wstty-agent application in the debugger profile.
+#
+function exec_usb_yac_wstty_agent {
+	yac start wstty-agent
+	yac wait wstty-agent
+}
+
+#
+# Apply DHCP on eth0.
+#
+function exec_usb_eth0_dhcp {
+	dhclient eth0
+	ifconfig -a
+}
+
+#
+# Time synchronization over network.
+#
+function exec_usb_ntp {
+	ntpdate ntp.ubuntu.com
+}
+
+#
+# Entry-Point
+#
+function run_yac_diagnose_usb {
+	export USB_CONF="/mnt/${BOOT_DISK}2/yac-usb.yml"
+	[ ! -f "${USB_CONF}" ] && DBG "missing ${USB_CONF}" && return 1
+	DBG "USB_CONF(${USB_CONF}):"
+	cat ${USB_CONF} | awk '{printf "\t%s\n", $0}'
+
+	local FORMAT=$(read_usb_conf "format")
+	[ "" == "${FORMAT}" ] && FORMAT="v1"
+	[ "v2" != "${FORMAT}" ] && DBG "only v2 action configuration is supported, but ${FORMAT} is listed" && return 1
+
+	local VALUES=$(read_usb_conf "actions")
+	[ "" == "${VALUES}" ] && DBG "missing __actions__ argument in ${USB_CONF}" && return 1
+
+	export USB_SYSTEM_DIR="/mnt/${BOOT_DISK}1"
+	export USB_CONFIG_DIR="/mnt/${BOOT_DISK}2"
+
+	local ACTIONS=($(echo ${VALUES} | tr ',' '\n'))
+	export func_prefix="exec_usb"
+	for act in "${ACTIONS[@]}" ; do
+		DBG "run-usb-action: $(LIGHT_GREEN ${act})"
+		USB_ACTION=${act} apply_func ${act} $@
+	done
+	unset func_prefix
+}

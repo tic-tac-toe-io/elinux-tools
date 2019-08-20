@@ -1,0 +1,343 @@
+#!/bin/bash
+#
+
+function LIGHT_GREEN {
+	COLOR='\033[1;32m'
+	NC='\033[0m'
+	echo "${COLOR}$@${NC}"
+}
+
+function PURPLE {
+	COLOR='\033[0;35m'
+	NC='\033[0m'
+	echo "${COLOR}$@${NC}"
+}
+
+function YELLOW {
+	local COLOR='\033[0;33m'
+	local NC='\033[0m'
+	echo "${COLOR}$@${NC}"
+}
+
+function DBG {
+	echo -e "$(date '+%H:%M:%S') [ye] $@\r"
+}
+
+function RUN_CMD_RAW {
+	DBG "\t$(PURPLE $@)"
+	$@
+	return $?
+}
+
+function RUN_CMD {
+	DBG "\t$(PURPLE $@)"
+	TMP=$(mktemp /tmp/XXXXXX)
+	$@ > ${TMP} 2>&1
+	[ "0" != "$?" ] && cat ${TMP}
+	rm -f ${TMP}
+}
+
+function fn_exist {
+	declare -f -F $1 > /dev/null
+	return $?
+}
+
+function apply_func {
+	local action=$(echo $1 | tr '-' '_'); shift
+	if [ "" == "${action}" ]; then
+		DBG "apply_func(): ${FUNCNAME[1]} caller has no action argument"
+		return 1
+	fi
+	[ "" == "${func_prefix}" ] && local func_prefix=${FUNCNAME[1]}
+	local func="${func_prefix}_${action}"
+	if fn_exist ${func}; then
+		DBG "apply_func(): $(LIGHT_GREEN ${func}) $(YELLOW $@)"
+		${func} $@
+	else
+		return 1
+	fi
+}
+
+function load_next_script {
+	local NAME=$1
+	[ "" == "${NAME}" ] && NAME=$(echo ${FUNCNAME[1]} | tr '_' '\n' | tail -n1)
+	local NEXT="${BASH_SOURCE[0]}.${NAME}"
+	DBG "checking ${NEXT} ..."
+	[ -f "${NEXT}" ] || return 1
+	DBG "loading ${NEXT} ..."
+	source ${NEXT}
+}
+
+function get_ys_variable {
+	local NAME=$1
+	[ "" == "${NAME}" ] && return 0
+	local VALUE=${!NAME}
+	[ "" != "${VALUE}" ] && echo ${VALUE} && return 0
+	cat /etc/environment | grep "^${NAME}=" | awk -F'=' '{print $2}'
+}
+
+function show_variables {
+	for v in "$@"; do
+		DBG "$v = $(LIGHT_GREEN ${!v})"
+	done
+}
+
+function init_variables {
+	local BOOT_PARTITION=$(mount | grep "on / type" | awk '{print $1}')
+	local DISKS=($(lsblk | grep disk | grep -v boot | awk '{print $1}'))
+
+	DBG "list all partitions ..."
+	blkid | awk '{printf "\t%s\n", $0}'
+
+	[ "nfs" == "$(mount | grep "on / type" | awk '{print $5}')" ] && export BOOT_DISK="nfs"
+	for d in "${DISKS[@]}"; do
+		[ "" != "$(echo ${BOOT_PARTITION} | grep $d)" ] && export BOOT_DISK=$d
+		if [ "" != "$(echo $d | grep mmcblk)" ]; then
+			if [ "" != "$(parted /dev/$d print | grep '^Model:' | sed 's/^Model:\ //g' | grep '^MMC')" ]; then
+				export EMMC_DISK=$d
+			else
+				export SDXC_DISK=$d
+			fi
+		fi
+	done
+	export TARGET_DISK=${EMMC_DISK}
+
+	DBG "BOOT_DISK = $(LIGHT_GREEN ${BOOT_DISK})"
+	DBG "EMMC_DISK = $(LIGHT_GREEN ${EMMC_DISK})"
+	DBG "SDXC_DISK = $(LIGHT_GREEN ${SDXC_DISK})"
+	[ "" == "${BOOT_DISK}" ] && DBG "ERROR!!! Missing BOOT_DISK from these disks" && lsblk | grep disk | grep -v boot | awk '{printf "\t%s\n", $1}' && exit 0
+
+	if [ "${BOOT_DISK}" == "${SDXC_DISK}" ]; then
+		DBG "detect current boot from micro SD card: $(parted /dev/${BOOT_DISK} print | grep '^Model:' | sed 's/^Model:\ //g')"
+		DBG "using emmc disk as target: ${EMMC_DISK}"
+	elif [ "${BOOT_DISK}" == "${EMMC_DISK}" ]; then
+		DBG "detect current boot from eMMC: $(parted /dev/${BOOT_DISK} print | grep '^Model:' | sed 's/^Model:\ //g')"
+	else
+		case "${BOOT_DISK}" in
+			sda)
+				DBG "detect current boot from USB stick: $(parted /dev/${BOOT_DISK} print | grep '^Model:' | sed 's/^Model:\ //g')"
+				DBG "using emmc disk as target: ${EMMC_DISK}"
+				;;
+			nfs)
+				DBG "detect current boot from Network: /dev/${BOOT_DISK} ($(LIGHT_GREEN ${BOOT_PARTITION}))"
+				;;
+			*)
+				DBG "detect current boot from unknown device: ${BOOT_DISK}"
+				;;
+		esac
+	fi
+
+	if [ "nfs" == "${BOOT_DISK}" ]; then
+		DBG "BOOT_DISK: $(YELLOW ${BOOT_DISK})"
+	else
+		local BOOT_DISK_SIZE=$(lsblk | grep "^${BOOT_DISK} " | awk '{print $4}')
+		local BOOT_DISK_TYPE=$(parted /dev/${BOOT_DISK} print | grep "^Model:" | sed 's/^Model:\ //g')
+		DBG "BOOT_DISK: $(YELLOW ${BOOT_DISK}) (size: $(LIGHT_GREEN ${BOOT_DISK_SIZE}), type: $(PURPLE ${BOOT_DISK_TYPE}))"
+	fi
+	local TARGET_DISK_SIZE=$(lsblk | grep "^${TARGET_DISK} " | awk '{print $4}')
+	local TARGET_DISK_TYPE=$(parted /dev/${TARGET_DISK} print | grep "^Model:" | sed 's/^Model:\ //g')
+	DBG "TARGET DISK: $(YELLOW ${TARGET_DISK}), size: $(LIGHT_GREEN ${TARGET_DISK_SIZE}), type: $(PURPLE ${TARGET_DISK_TYPE})"
+
+	export YS_PARTITION_SYS_ID=$(get_ys_variable YS_PARTITION_SYS_ID)
+	export YS_PARTITION_APP_ID=$(get_ys_variable YS_PARTITION_APP_ID)
+	export YS_PARTITION_DAT_ID=$(get_ys_variable YS_PARTITION_DAT_ID)
+	export YS_DIR=$(get_ys_variable YS_DIR)
+	export YS_APP_DIR=$(get_ys_variable YS_APP_DIR)
+	export YS_DAT_DIR=$(get_ys_variable YS_DAT_DIR)
+
+	export YS_BOOT_ARGS=$(mktemp /tmp/XXXXXX)
+	cat /proc/cmdline | tr ' ' '\n' | grep "^yac=" | awk -F'=' '{print $2}' | tr ',' '\n' > ${YS_BOOT_ARGS}
+	export YS_BOOT_CMD=$(cat ${YS_BOOT_ARGS} | head -n1 | tr '-' '_')
+	sed -i '1d' ${YS_BOOT_ARGS}
+	export YS_BOOT_ROOT_PART=$(cat /proc/cmdline | tr ' ' '\n' | grep "^root=" | awk -F'=' '{print $2}' | xargs basename)
+
+	export YS_ETH_MACADDR=$(ifconfig | grep eth0 | awk '{print $5}')
+
+	export SHYAML="/usr/local/bin/shyaml"
+	export HTTPIE="/usr/local/bin/http"
+	export WGET="/usr/bin/wget"
+
+	show_variables PATH \
+		YS_DIR \
+		YS_APP_DIR \
+		YS_DAT_DIR \
+		YS_PARTITION_SYS_ID \
+		YS_PARTITION_APP_ID \
+		YS_PARTITION_DAT_ID \
+		YS_BOOT_CMD \
+		YS_BOOT_ARGS \
+		YS_BOOT_ROOT_PART \
+		YS_ETH_MACADDR \
+		SHYAML \
+		HTTPIE \
+		WGET
+}
+
+function clear_variables {
+	[ "" != "${YS_BOOT_ARGS}" ] && rm -f ${YS_BOOT_ARGS}
+}
+
+function mount_disks {
+	local DISKS=($(lsblk | grep disk | grep -v boot | awk '{print $1}'))
+	for disk in "${DISKS[@]}"; do
+		local PARTITIONS=($(blkid | grep "^/dev/${disk}" | awk -F':' '{print $1}'))
+		for p in "${PARTITIONS[@]}"; do
+			RUN_CMD mkdir -p /mnt/$(basename $p)
+			RUN_CMD mount $p /mnt/$(basename $p)
+			DBG "mounting /mnt/$(basename $p) from $(LIGHT_GREEN $p)"
+		done
+	done
+}
+
+function mount_partition {
+	local ID=$1
+	local DIR=$2
+	[ "" == "${ID}" ] && DBG "mount_partition(): missing ID" && exit 0
+	[ "" == "${DIR}" ] && DBG "mount_partition(): missing DIR" && exit 0
+
+	local PARTITION=$(blkid | grep "^/dev/${BOOT_DISK}" | awk -F':' '{print $1}' | grep "${ID}$" | head -n1)
+	[ "" == "${PARTITION}" ] && DBG "mount_partition(): missing ${ID} in partitions" && blkid | grep "^/dev/${BOOT_DISK}" && exit 0
+	[ ! -d "${DIR}" ] && RUN_CMD mkdir -p ${DIR}
+	RUN_CMD mount ${PARTITION} ${DIR}
+}
+
+function mount_directories {
+	DBG "$(LIGHT_GREEN 'mount partitions and directories')"
+	[ "${YS_PARTITION_APP_ID}" != "${YS_PARTITION_SYS_ID}" ] && mount_partition ${YS_PARTITION_APP_ID} ${YS_APP_DIR}
+	[ "${YS_PARTITION_DAT_ID}" != "${YS_PARTITION_SYS_ID}" ] && mount_partition ${YS_PARTITION_DAT_ID} ${YS_DAT_DIR}
+
+	RUN_CMD mkdir -p /opt/yapps-scripts
+	RUN_CMD mount -o bind ${YS_APP_DIR}/yapps-scripts /opt/yapps-scripts
+}
+
+function exec_emmc_factory_reset {
+	local SYSTEM_BACKUP_DIR="/tmp/backup"
+	local SYSTEM_TARGET_DIR="/tmp/target"
+	local SYSTEM_TARGET_PART="/dev/${BOOT_DISK}p${YS_PARTITION_SYS_ID}"
+	local ROOTFS_ARCHIVE="/opt/backup/rootfs/toe-system-linux-rootfs.sqfs"
+	[ ! -f "${ROOTFS_ARCHIVE}" ] && DBG "no rootfs backup archive => ${ROOTFS_ARCHIVE}" && return 1
+	[ ! -f "${ROOTFS_ARCHIVE}.size" ] && DBG "no rootfs backup archive size => ${ROOTFS_ARCHIVE}.size" && return 1
+	local SYSTEM_BACKUP_SIZE=$(cat ${ROOTFS_ARCHIVE}.size)
+
+	local PARTITION=$(blkid | grep "^/dev/${BOOT_DISK}" | awk -F':' '{print $1}' | grep "${ID}$" | head -n1)
+
+	RUN_CMD_RAW mkdir -p ${SYSTEM_BACKUP_DIR}
+	RUN_CMD_RAW mkdir -p ${SYSTEM_TARGET_DIR}
+	RUN_CMD_RAW mount -o ro ${ROOTFS_ARCHIVE} ${SYSTEM_BACKUP_DIR}
+	RUN_CMD_RAW mkfs.ext4 ${SYSTEM_TARGET_PART}
+	RUN_CMD_RAW mount ${SYSTEM_TARGET_PART} ${SYSTEM_TARGET_DIR}
+	RUN_CMD_RAW cd ${SYSTEM_BACKUP_DIR}
+	DBG "start file transfer from backup to target partition $(LIGHT_GREEN ${SYSTEM_TARGET_PART}) ..."
+	local START=$(date +%s)
+	tar cf - . | pv -s ${SYSTEM_BACKUP_SIZE} -n | tar xf - -C ${SYSTEM_TARGET_DIR}
+	local END=$(date +%s)
+	DBG "total $((END-START)) seconds."
+	RUN_CMD_RAW umount ${SYSTEM_TARGET_DIR}
+	RUN_CMD_RAW sync
+	RUN_CMD_RAW reboot
+	return 0
+}
+
+function run_yac_diagnose_factory_reset {
+	# [todo]: verify run_yac_diagnose_factory_reset().
+	#
+	if [ "mmcblk0" == "${BOOT_DISK}" ]; then
+		local PARTITION=$(mount | grep "on / type" | awk '{print $1}')
+		if [ "/dev/mmcblk0p1" == "${PARTITION}" ]; then
+			exec_emmc_factory_reset $@
+		else
+			DBG "unexpected partition for emmc factory-reset: ${PARTITION}"
+			return 1
+		fi
+	else
+		DBG "unexpected boot disk for emmc factory-reset: ${BOOT_DISK}"
+		return 1
+	fi
+}
+
+function run_yac_diagnose {
+	local ARG=$1; shift
+	[ "" == "${ARG}" ] && ARG="factory-reset"
+
+	export PATH=$(cat /etc/environment | grep "^PATH=" | awk -F'=' '{print $2}' | sed 's/\"//g')
+
+	case "${ARG}" in
+		factory-reset)
+			# Boots from mmc0p1 (RECOVERY partition). 
+			#
+			# kernel-cmdline: yac=diagnose,factory-reset
+			#
+			run_yac_diagnose_factory_reset $@
+			;;
+		usb)
+			# Boots from usb0p1 (USB Storage).
+			#
+			# kernel-cmdline: yac=diagnose,usb
+			# load `/etc/rc.local.yac.usb` and run run_yac_diagnose_usb()
+			#
+			[ "sda" != "${BOOT_DISK}" ] && DBG "unexpected partition (${BOOT_DISK}) for usb diagnosis..." && return 1
+			load_next_script ${ARG} && apply_func ${ARG} $@
+			;;
+		netboot)
+			# Boots from nfs (NetBoot Production Server + NFS)
+			#
+			# kernel-cmdline: yac=diagnose,netboot,flasher,<production-server-url>
+			# load `/etc/rc.local.yac.netboot` and run run_yac_diagnose_netboot()
+			#
+			[ "nfs" != "${BOOT_DISK}" ] && DBG "unexpected partition ${BOOT_DISK} for netboot ..." && return 1
+			load_next_script ${ARG} && apply_func ${ARG} $@
+			;;
+		*)
+			# Boots from unknown media.
+			#
+			load_next_script ${ARG} && apply_func ${ARG} $@
+			apply_func ${ARG} $@
+			;;
+	esac
+}
+
+function run_yac_system {
+	# Call to yac script to boot yapps.
+	DBG "running $(LIGHT_GREEN 'yac boot') in the background"
+	LOG_LINE_END="\r" yac boot &
+	return 0
+}
+
+function run_boot_yac_cmd {
+	local ACTION=${YS_BOOT_CMD}
+	[ "" == "${ACTION}" ] && ACTION="system"
+	case "${ACTION}" in
+		system)
+			mount_directories
+			run_yac_system
+			;;
+		diagnose)
+			mount_disks
+			run_yac_diagnose $@
+			;;
+		*)
+			mount_disks
+			DBG "run_boot_yac_cmd(): next => ${ACTION}"
+			apply_func ${ACTION} $@
+			;;
+	esac
+}
+
+function run_boot_fallback {
+	[ "nfs" == "${BOOT_DISK}" ] || dhclient eth0
+	ifconfig -a
+}
+
+function run_boot_cmd {
+	run_boot_yac_cmd $(cat ${YS_BOOT_ARGS} | tr '\n' ' ')
+	[ "0" != "$?" ] && run_boot_fallback || return 0
+}
+
+function rc_local_yac_main {
+	export PATH=$(cat /etc/environment | grep "^PATH=" | awk -F'=' '{print $2}' | sed 's/\"//g')
+	init_variables
+	run_boot_cmd $@
+	clear_variables
+}
+
+rc_local_yac_main $@

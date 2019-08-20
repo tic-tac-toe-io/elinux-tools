@@ -1,0 +1,167 @@
+#!/bin/bash
+#
+
+function deliver_to_sensorboard {
+	if [ "" == "$(/bin/netstat -tulnp | grep ':10011')" ]; then
+		echo "/usr/bin/socat - file:/dev/ttyO1,b57600,nonblock,raw,echo=0,crnl"
+	else
+		echo "/usr/bin/socat - tcp-connect:127.0.0.1:10011"
+	fi
+}
+
+function ascii_to_hex {
+	LC_CTYPE=C printf '%x' "'$1"
+}
+
+function number_to_hex {
+	printf '%x' $1
+}
+
+function send_to_sensorboard {
+	local CMD=$1
+	DBG "sending $(LIGHT_GREEN ${CMD}) to sensorboard ($(deliver_to_sensorboard))"
+	echo -e "\n\n${CMD}\n\n" | $(deliver_to_sensorboard) > /dev/null
+}
+
+function sb_send_ascii {
+	send_to_sensorboard "#LMA,$(ascii_to_hex $1)"
+}
+
+function sb_send_number {
+	send_to_sensorboard "#LMN,$(number_to_hex $1)"
+}
+
+function notify_production_srv {
+	local EVT=$1; shift
+	local ARG=$1; shift
+	local CMD="${WGET} -q -O /tmp/notify_production_srv ${PS_URL}/notify/${YS_ETH_MACADDR}/${EVT}/$(cat /proc/uptime | awk '{print $1}')"
+	[ "" != "${ARG}" ] && CMD="${CMD}/${ARG}"
+
+	DBG "notify_production_srv(): $(LIGHT_GREEN ${CMD})"
+	${BASH} -c "${CMD}"
+}
+
+function notify_progress {
+	[ "" == "${NUMBER}" ] && DBG "[missing number]: $@" && return
+	[ "" == "${EVENT}" ] && DBG "[missing event]: $@" && return
+	sb_send_number ${NUMBER}
+	notify_production_srv ${EVENT} ${NUMBER}
+	DBG "$@"
+}
+
+function notify_error {
+	[ "" == "${ASCII}" ] || sb_send_ascii ${ASCII}
+	DBG "$@"
+	[ "" == "${ERROR}" ] && return 0
+	[ "" == "${PS_URL}" ] && return 0
+	local UPTIME=$(cat /proc/uptime | awk '{print $1}')
+	DBG "${WGET} -q -O /tmp/wget.log ${PS_URL}/notify-error/${YS_ETH_MACADDR}/${ERROR}/${UPTIME}"
+	${WGET} -q -O /tmp/wget.log ${PS_URL}/notify-error/${YS_ETH_MACADDR}/${ERROR}/${UPTIME} > /dev/null 2>&1
+	notify_production_srv "end"
+}
+
+function exec_netboot_flasher {
+	RUN_CMD "echo -n 'performance' > /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"
+
+	local IP=$1; shift
+	local PROFILE=$1; shift
+	local VERSION=$1; shift
+	if [ "" == "${IP} " ]; then
+		ASCII=A ERROR="missing-ip" notify_error "missing IP address of production server"; return 1
+	fi
+	if [ "" == "${VERSION}" ]; then
+		ASCII=B ERROR="missing-version" notify_error "missing target version for base image to be flashed"; return 1
+	fi
+	if [ "" == "${PROFILE}" ]; then
+		ASCII=C ERROR="missing-profile" notify_error "missing profile"; return 1
+	fi
+	local PORT=7090
+	export PS_URL="http://${IP}:${PORT}"
+
+	NUMBER=1 EVENT="begin" notify_progress "production-server: $(LIGHT_GREEN ${PS_URL})"
+
+	cd /tmp
+	${WGET} -q -O /tmp/now ${PS_URL}/now
+	if [ "0" == "$?" ]; then
+		local EPOCH=$(cat /tmp/now)
+		DBG "production-server date-time => ${EPOCH}s"
+		DBG "time synchronization, before => $(date)"
+		date -s "@${EPOCH}"
+		NUMBER=2 EVENT="init:time_sync" notify_progress "time synchronized => $(date)"
+	fi
+
+	export PATH=$(cat /etc/environment | grep "^PATH=" | awk -F'=' '{print $2}' | sed 's/\"//g')
+
+	# No need for dhcp, because already allocating ip address from DHCP server
+	# since boot up. => `dhclient eth0`
+	ifconfig -a
+
+	# Mount NFS directory for image writing.
+	#
+	local IMAGE_DIR="/mnt/images"
+	mount -t nfs ${IP}:${IMAGE_DIR} ${IMAGE_DIR}
+	if [ "0" == "$?" ]; then
+		NUMBER=3 EVENT="init:mount_nfs" notify_progress "successfully mount $(LIGHT_GREEN ${IP}:${IMAGE_DIR})"
+		ls -alh ${IMAGE_DIR}
+	else
+		ASCII=D ERROR="nfs-mount-failure" notify_error "failed to mount ${IP}:${IMAGE_DIR}"; return 1
+	fi
+
+	# Check target image file
+	#   E.g. /mnt/images/CONSCIOUS-IPCS3-Base-Release-20180713A.sqfs
+	#
+	[ "" == "${BOARD}" ] && local BOARD=$(cat /etc/environment | grep "^BOARD=" | awk -F'=' '{print $2}')
+	local PX=$(echo ${PROFILE} | tr '[a-z]' '[A-Z]')
+	local BX=$(echo ${BOARD}   | tr '[a-z]' '[A-Z]')
+	local IMAGE_FILE="${IMAGE_DIR}/${PX}-${BX}-Base-Release-${VERSION}.sqfs"
+	if [ -f "${IMAGE_FILE}" ]; then
+		NUMBER=4 EVENT="init:check_image" notify_progress "successfully mount $(LIGHT_GREEN ${IP}:${IMAGE_DIR})"
+	else
+		ASCII=E ERROR="missing-image-file" notify_error "no such image file ${IMAGE_FILE}"; return 1
+	fi
+	local ACTION=""
+
+	# Initialize TOE environment with yapps-scripts/bin/yac_boot
+	#
+	ACTION="boot"
+	LOG_LINE_END="\r" \
+		FLASHER=true \
+		EVT_URL="${PS_URL}/notify/${YS_ETH_MACADDR}" \
+		ERR_URL="${PS_URL}/notify-error/${YS_ETH_MACADDR}" \
+		yac ${ACTION}
+
+	# Update registration information to TIC-DM server
+	#
+	ACTION="register_netboot"
+	FORCE=true \
+		IP=${IP} \
+		PORT=${PORT} \
+		VERSION=${VERSION} \
+		EVT_URL="${PS_URL}/notify/${YS_ETH_MACADDR}" \
+		ERR_URL="${PS_URL}/notify-error/${YS_ETH_MACADDR}" \
+		yac ${ACTION} production || return 1
+
+	# Flash the local archive to eMMC.
+	#	E.g. /mnt/images/CONSCIOUS-IPCS3-Base-Release-20180713A.sqfs
+	#
+	ACTION="downstore_netboot"
+	XXX=true \
+		EVT_URL="${PS_URL}/notify/${YS_ETH_MACADDR}" \
+		ERR_URL="${PS_URL}/notify-error/${YS_ETH_MACADDR}" \
+		yac ${ACTION} ${IMAGE_FILE} || return 1
+
+	NUMBER=99 EVENT=end notify_progress "finished!!"
+	reboot
+}
+
+function run_yac_diagnose_netboot_flasher {
+	exec_netboot_flasher $@
+}
+
+#
+# Entry Point
+#
+function run_yac_diagnose_netboot {
+	[ "$1" == "flasher" ] && shift && run_yac_diagnose_netboot_flasher $@
+	return 1
+}
