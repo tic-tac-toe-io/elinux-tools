@@ -84,7 +84,11 @@ function show_variables {
 
 function init_variables {
 	local BOOT_PARTITION=$(mount | grep "on / type" | awk '{print $1}')
-	local DISKS=($(lsblk | grep disk | grep -v boot | awk '{print $1}'))
+	if [ "overlayroot" == "${BOOT_PARTITION}" ]; then
+		BOOT_PARTITION=$(mount | grep -v "^overlayroot" | grep $(mount | grep "on / type" | awk '{print $6}' | sed 's/(//g' | sed 's/)//g' | tr ',' '\n' | grep "^lowerdir" | awk -F'=' '{print $2}') | awk '{print $1}')
+		DBG "detecting overlayroot feature is enabled, using the partition as its lowerdir as BOOT_PARTITION => $(LIGHT_GREEN ${BOOT_PARTITION})"
+	fi
+	local DISKS=($(lsblk --json --output-all --bytes | jq -r '.blockdevices | .[] | select(.type == "disk") | .name' | grep -v "boot.*$" | grep -v "rpmb$"))
 
 	DBG "list all partitions ..."
 	blkid | awk '{printf "\t%s\n", $0}'
@@ -92,7 +96,7 @@ function init_variables {
 	[ "nfs" == "$(mount | grep "on / type" | awk '{print $5}')" ] && export BOOT_DISK="nfs"
 	for d in "${DISKS[@]}"; do
 		[ "" != "$(echo ${BOOT_PARTITION} | grep $d)" ] && export BOOT_DISK=$d
-		if [ "" != "$(echo $d | grep mmcblk)" ]; then
+		if [ "" != "$(lsblk --json --output NAME,SUBSYSTEMS /dev/$d | jq -r '.blockdevices | .[0] | select(.subsystems|test(".mmc_host.")) | .name')" ]; then
 			if [ "" != "$(parted /dev/$d print | grep '^Model:' | sed 's/^Model:\ //g' | grep '^MMC')" ]; then
 				export EMMC_DISK=$d
 			else
@@ -205,6 +209,8 @@ function mount_directories {
 	DBG "$(LIGHT_GREEN 'mount partitions and directories')"
 	[ "${YS_PARTITION_APP_ID}" != "${YS_PARTITION_SYS_ID}" ] && mount_partition ${YS_PARTITION_APP_ID} ${YS_APP_DIR}
 	[ "${YS_PARTITION_DAT_ID}" != "${YS_PARTITION_SYS_ID}" ] && mount_partition ${YS_PARTITION_DAT_ID} ${YS_DAT_DIR}
+
+	[ -f "/opt/yapps-scripts/bin/yac" ] && return 0
 
 	RUN_CMD mkdir -p /opt/yapps-scripts
 	RUN_CMD mount -o bind ${YS_APP_DIR}/yapps-scripts /opt/yapps-scripts
