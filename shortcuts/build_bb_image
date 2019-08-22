@@ -20,14 +20,19 @@ function build_image {
 	NAME=${NAME%.*}
 	local ARCHIVE_DIR="/tmp/${NAME}-$(date '+%Y%m%d%H%M%S')"
 	local ARCHIVE_IMAGE="/tmp/${NAME}.sqfs.xz"
+	echo "DOWNLOAD_FILE = ${DOWNLOAD_FILE}"
+	echo "NAME = ${NAME}"
+	echo "DEVICE_IMAGE_FILE = ${DEVICE_IMAGE_FILE}"
+	echo "ARCHIVE_DIR = ${ARCHIVE_DIR}"
+	echo "ARCHIVE_IMAGE = ${ARCHIVE_IMAGE}"
 
 	rm -rf ${ARCHIVE_DIR}
 
-	[ ! -f "${ARCHIVE_FILE}" ] && wget -O ${ARCHIVE_FILE} ${URL}
-	# [ "0" != "$?" ] && echo "failed to download ${URL}" && exit 1
+	[ ! -f "${DOWNLOAD_FILE}" ] && wget -O ${DOWNLOAD_FILE} ${URL}
+	[ "0" != "$?" ] && echo "failed to download ${URL}" && exit 1
 
-	[ ! -f "${DEVICE_IMAGE_FILE}" ] && unxz -k ${ARCHIVE_FILE}
-	# [ "0" != "$?" ] && echo "failed to uncompress ${ARCHIVE_FILE}" && exit 2
+	[ ! -f "${DEVICE_IMAGE_FILE}" ] && unxz -k ${DOWNLOAD_FILE}
+	[ "0" != "$?" ] && echo "failed to uncompress ${DOWNLOAD_FILE}" && exit 2
 
 	[ ! -f "${DEVICE_IMAGE_FILE}" ] && echo "still missing ${DEVICE_IMAGE_FILE}" && exit 3
 
