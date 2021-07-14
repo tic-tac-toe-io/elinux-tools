@@ -21,6 +21,9 @@ function check_rootfs {
 
 function detect_rootfs {
 	local ROOTFS=$1
+	local PREFERRED_SHELL=$2
+	INFO "PREFERRED_SHELL = ${PREFERRED_SHELL}"
+
 	##
 	# Check rootfs is Raspbian.
 	#
@@ -33,7 +36,10 @@ function detect_rootfs {
 	##
 	# Detect which shell is used.
 	#
-	if [ -f "${ROOTFS}/usr/bin/sh" ]; then
+	if [ -f "${ROOTFS}${PREFERRED_SHELL}" ]; then
+		INFO "using preferred shell: ${PREFERRED_SHELL}"
+		export ROOTFS_SHELL=${PREFERRED_SHELL}
+	elif [ -f "${ROOTFS}/usr/bin/sh" ]; then
 		if [ -s "${ROOTFS}/usr/bin/sh" ]; then
 			local RSH=$(basename $(which $(readlink "${ROOTFS}/usr/bin/sh")))
 			INFO "detect the shell: ${RSH}"
@@ -43,7 +49,34 @@ function detect_rootfs {
 			export ROOTFS_SHELL=/usr/bin/sh
 		fi
 	else
-		ERR "missing /usr/bin/sh as Shell entry point"
+		if [ -f "${ROOTFS}/usr/bin/bash" ]; then
+			export ROOTFS_SHELL=/usr/bin/bash
+			WARN "missing /usr/bin/sh as Shell entry point, fallback to /usr/bin/bash"
+		elif [ -f "${ROOTFS}/usr/bin/dash" ]; then
+			export ROOTFS_SHELL=/usr/bin/dash
+			WARN "missing /usr/bin/sh as Shell entry point, fallback to /usr/bin/dash"
+		else
+			WARN "missing /usr/bin/sh as Shell entry point, and no available shells to fallback, exit..."
+			exit 1
+		fi
+	fi
+
+	##
+	# Detect which Qemu to use
+	#
+	if [ "-" == "${QEMU}" ]; then
+		export QEMU="/tmp/qemu-arm-static"
+		wget --output-document=${QEMU} https://github.com/multiarch/qemu-user-static/releases/download/v3.1.1-2/qemu-arm-static
+		[ "0" != "$?" ] && ERR "failed to download pre-built qemu binary" && exit 1
+		chmod +x ${QEMU}
+		INFO "using qemu from Github: v3.1.1-2"
+	elif [ -f "${QEMU}" ]; then
+		INFO "using qemu from the specified path: ${QEMU}"
+	elif [ "" != "$(which qemu-arm-static)" ]; then
+		export QEMU=$(which qemu-arm-static)
+		INFO "using qemu from system: ${QEMU}"
+	else
+		ERR "missing QEmu"
 		exit 1
 	fi
 }
@@ -74,7 +107,7 @@ function pre_rootfs {
 	local KERNEL_REGISTER_MARK="/tmp/.arm-binfmt_misc"
 
 	check_rootfs ${ROOTFS} root lib etc usr opt var
-	detect_rootfs ${ROOTFS}
+	detect_rootfs ${ROOTFS} $2
 
 	case "${CHROOT_SPECIFIC}" in
 		raspbian)
@@ -97,6 +130,7 @@ function pre_rootfs {
 	esac
 
 	remount_sys_dirs ${ROOTFS} tmp dev sys proc
+	[ "true" == "${NEED_PTS}" ] && RUN_CMD mount -o bind /dev/pts ${ROOTFS}/dev/pts
 
 	# This registers the static QEMU we copied as arm-interpreter to the kernel.
 	#
@@ -108,12 +142,13 @@ function pre_rootfs {
 		RUN_CMD touch ${ROOTFS}/usr/bin/qemu-arm-static.copy
 		RUN_CMD mv ${ROOTFS}/usr/bin/qemu-arm-static ${ROOTFS}/usr/bin/qemu-arm-static.bak
 	fi
-	RUN_CMD cp $(which qemu-arm-static) ${ROOTFS}/usr/bin/
+	RUN_CMD cp ${QEMU} ${ROOTFS}/usr/bin/qemu-arm-static
 }
 
 
 function post_rootfs {
 	local ROOTFS=$1
+	[ "true" == "${NEED_PTS}" ] && RUN_CMD umount ${ROOTFS}/dev/pts
 	umount_sys_dirs ${ROOTFS} tmp dev sys proc
 
 	case "${CHROOT_SPECIFIC}" in
@@ -139,7 +174,7 @@ function post_rootfs {
 
 
 function chroot_with_shell {
-	pre_rootfs ${ROOTFS_DIR}
+	pre_rootfs ${ROOTFS_DIR} $@
 	chroot ${ROOTFS_DIR} ${ROOTFS_SHELL}
 	post_rootfs ${ROOTFS_DIR}
 }
@@ -171,7 +206,7 @@ function chroot_with_script {
 function mycli_command_help {
 cat <<__EOF__
 Enter interactive mode of BASH
-	${CLI_NAME} ${CLI_ACTION} $(YELLOW shell) $(LIGHT_GREEN [ROOTFS_PATH])
+	${CLI_NAME} ${CLI_ACTION} $(YELLOW shell) $(LIGHT_GREEN [ROOTFS_PATH]) [$(GRAY SHELL_PATH)]
 	${CLI_NAME} ${CLI_ACTION} shell .
 	${CLI_NAME} ${CLI_ACTION} shell /tmp/14.04.3
 
